@@ -58,6 +58,11 @@ class MockCkanHandler(SimpleHTTPRequestHandler):
             dataset = self.get_dataset(dataset_ref)
             if dataset:
                 return self.respond_action(dataset)
+        if self.path.startswith('/api/action/organization_show'):
+            params = self.get_url_params()
+            org = self.get_org(params['id'])
+            if org:
+                return self.respond_action(org)
         if self.path.startswith('/api/action/group_show'):
             params = self.get_url_params()
             group_ref = params['id']
@@ -505,7 +510,11 @@ INVALID_TAGS = [
 
 ORGS = [
     {'id': '0f8380d6-241a-47de-aa52-8bd91c763d97',
-     'name': 'org1'},
+     'name': 'org1',
+     # an uploaded logo, as CKAN returns it
+     'image_url': '2026-03-17-124829.894486logo.png',
+     'image_display_url': 'http://localhost:%s/uploads/group/'
+                          '2026-03-17-124829.894486logo.png' % PORT},
     {'id': 'aa1e068a-23da-4563-b9c2-2cad272b663e',
      'name': 'cabinet-office'}
 ]
