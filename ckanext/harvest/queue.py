@@ -1,9 +1,12 @@
 import logging
 import datetime
 import json
+import time
 
-
-import redis
+try:
+    import redis
+except ImportError:
+    redis = None
 try:
     import pika
 except ImportError:
@@ -14,7 +17,8 @@ from ckan.lib.base import config
 from ckan.plugins import PluginImplementations
 from ckan import model
 
-from ckanext.harvest.model import HarvestJob, HarvestObject, HarvestGatherError
+from ckanext.harvest.model import (HarvestJob, HarvestObject, HarvestGatherError,
+                                   HarvestQueueMessage)
 from ckanext.harvest.interfaces import IHarvester
 
 log = logging.getLogger(__name__)
@@ -32,6 +36,8 @@ VIRTUAL_HOST = '/'
 MQ_TYPE = 'redis'
 REDIS_PORT = 6379
 REDIS_DB = 0
+# seconds between two looks at an empty database queue
+POSTGRES_POLL_INTERVAL = 2
 
 # settings for AMQP
 EXCHANGE_TYPE = 'direct'
@@ -44,6 +50,9 @@ def get_connection():
         return get_connection_amqp()
     if backend == 'redis':
         return get_connection_redis()
+    if backend == 'postgres':
+        # the queue lives in CKAN's database, reached through model.Session
+        return None
     raise Exception('not a valid queue type %s' % backend)
 
 
@@ -73,6 +82,9 @@ def get_connection_amqp():
 
 
 def get_connection_redis():
+    if not redis:
+        raise ValueError("The redis library is needed to use Redis as the backend. "
+                         "Install it with `pip install ckanext-harvest[redis]`")
     if not config.get('ckan.harvest.mq.hostname') and config.get('ckan.redis.url'):
         return redis.Redis.from_url(
             config['ckan.redis.url'],
@@ -119,11 +131,11 @@ def purge_queues():
         log.info('AMQP queue purged: %s', get_gather_queue_name())
         channel.queue_purge(queue=get_fetch_queue_name())
         log.info('AMQP queue purged: %s', get_fetch_queue_name())
-    elif backend == 'redis':
+    elif backend in ('redis', 'postgres'):
         get_gather_consumer().queue_purge()
-        log.info('Redis gather queue purged')
+        log.info('%s gather queue purged', backend)
         get_fetch_consumer().queue_purge()
-        log.info('Redis fetch queue purged')
+        log.info('%s fetch queue purged', backend)
 
 
 def resubmit_jobs():
@@ -132,6 +144,11 @@ def resubmit_jobs():
     These are removed from the queues and placed back on them afresh, to ensure
     the fetch & gather consumers are triggered to process it.
     '''
+    if config.get('ckan.harvest.mq.type') == 'postgres':
+        # 3 minutes for fetch and import, 3 hours for a gather
+        _postgres_release_stale(get_fetch_routing_key(), 180)
+        _postgres_release_stale(get_gather_routing_key(), 7200)
+        return
     if config.get('ckan.harvest.mq.type') != 'redis':
         return
     redis = get_connection()
@@ -175,22 +192,24 @@ def resubmit_jobs():
 
 def resubmit_objects():
     '''
-    Resubmit all WAITING objects on the DB that are not present in Redis
+    Resubmit all WAITING objects on the DB that are not present in the queue
     '''
-    if config.get('ckan.harvest.mq.type') != 'redis':
+    backend = config.get('ckan.harvest.mq.type')
+    if backend not in ('redis', 'postgres'):
         return
-    redis = get_connection()
     publisher = get_fetch_publisher()
 
     waiting_objects = model.Session.query(HarvestObject.id) \
         .filter_by(state='WAITING') \
         .all()
 
-    objects_in_queue = []
     fetch_routing_key = get_fetch_routing_key()
-
-    objects_in_queue = [json.loads(o)['harvest_object_id']
-                        for o in redis.lrange(fetch_routing_key, 0, -1)]
+    if backend == 'postgres':
+        bodies = [row.body for row in model.Session.query(HarvestQueueMessage.body)
+                  .filter_by(routing_key=fetch_routing_key, claimed=None)]
+    else:
+        bodies = get_connection().lrange(fetch_routing_key, 0, -1)
+    objects_in_queue = [json.loads(o)['harvest_object_id'] for o in bodies]
 
     for object_id, in waiting_objects:
         if object_id not in objects_in_queue:
@@ -246,6 +265,28 @@ class RedisPublisher(object):
         return
 
 
+class PostgresPublisher(object):
+    """Publisher on the harvest_queue table of CKAN's database."""
+
+    def __init__(self, routing_key):
+        self.routing_key = routing_key
+
+    def send(self, body, **kw):
+        value = json.dumps(body)
+        if self.routing_key == get_gather_routing_key():
+            # a job already waiting is not queued twice
+            model.Session.query(HarvestQueueMessage) \
+                .filter_by(routing_key=self.routing_key, body=value,
+                           claimed=None) \
+                .delete(synchronize_session=False)
+        model.Session.add(HarvestQueueMessage(routing_key=self.routing_key,
+                                              body=value))
+        model.Session.commit()
+
+    def close(self):
+        return
+
+
 def get_publisher(routing_key):
     connection = get_connection()
     backend = config.get('ckan.harvest.mq.type', MQ_TYPE)
@@ -258,6 +299,8 @@ def get_publisher(routing_key):
                          routing_key=routing_key)
     if backend == 'redis':
         return RedisPublisher(connection, routing_key)
+    if backend == 'postgres':
+        return PostgresPublisher(routing_key)
 
 
 class FakeMethod(object):
@@ -328,6 +371,71 @@ class RedisConsumer(object):
         return (FakeMethod(body), self, body)
 
 
+class PostgresConsumer(object):
+    """Consumer on the harvest_queue table of CKAN's database. Same
+    interface as RedisConsumer: a claimed row plays the part of the
+    persistence key, and the row is deleted on ack."""
+
+    def __init__(self, routing_key):
+        self.routing_key = routing_key
+        self.message_key = routing_key.split(':')[-1]
+
+    def _claim(self):
+        row = model.Session.query(HarvestQueueMessage) \
+            .filter_by(routing_key=self.routing_key, claimed=None) \
+            .order_by(HarvestQueueMessage.created, HarvestQueueMessage.id) \
+            .with_for_update(skip_locked=True) \
+            .first()
+        if row is None:
+            model.Session.rollback()
+            return None
+        row.claimed = datetime.datetime.utcnow()
+        body = row.body
+        model.Session.commit()
+        return body
+
+    def consume(self, queue):
+        while True:
+            body = self._claim()
+            if body is None:
+                time.sleep(POSTGRES_POLL_INTERVAL)
+                continue
+            yield (FakeMethod(body), self, body)
+
+    def basic_ack(self, message):
+        model.Session.query(HarvestQueueMessage) \
+            .filter_by(routing_key=self.routing_key, body=message) \
+            .filter(HarvestQueueMessage.claimed.isnot(None)) \
+            .delete(synchronize_session=False)
+        model.Session.commit()
+
+    def queue_purge(self, queue=None):
+        count = model.Session.query(HarvestQueueMessage) \
+            .filter_by(routing_key=self.routing_key) \
+            .delete(synchronize_session=False)
+        model.Session.commit()
+        return count
+
+    def basic_get(self, queue):
+        body = self._claim()
+        return (FakeMethod(body), self, body)
+
+
+def _postgres_release_stale(routing_key, seconds):
+    """Put back on the queue the messages claimed more than ``seconds``
+    ago: their consumer died before acknowledging them."""
+    limit = datetime.datetime.utcnow() - datetime.timedelta(seconds=seconds)
+    count = model.Session.query(HarvestQueueMessage) \
+        .filter_by(routing_key=routing_key) \
+        .filter(HarvestQueueMessage.claimed < limit) \
+        .update({HarvestQueueMessage.claimed: None},
+                synchronize_session=False)
+    model.Session.commit()
+    if count:
+        log.debug('[%s]: %s stale messages back on the queue',
+                  routing_key, count)
+
+
 def get_consumer(queue_name, routing_key):
 
     connection = get_connection()
@@ -341,6 +449,8 @@ def get_consumer(queue_name, routing_key):
         return channel
     if backend == 'redis':
         return RedisConsumer(connection, routing_key)
+    if backend == 'postgres':
+        return PostgresConsumer(routing_key)
 
 
 def gather_callback(channel, method, header, body):

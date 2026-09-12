@@ -19,7 +19,13 @@ version 2.0+.
    you prefer depending on your needs, but Redis has been found to be more stable
    and reliable so it is the recommended one:
 
-   * `Redis <http://redis.io/>`_ (recommended): To install it, run::
+   * The CKAN database (no extra service): the gather and fetch queues are
+     a table in CKAN's PostgreSQL database. On your CKAN configuration file,
+     add in the `[app:main]` section::
+
+      ckan.harvest.mq.type = postgres
+
+   * `Redis <http://redis.io/>`_: To install it, run::
 
       sudo apt-get update
       sudo apt-get install redis-server
@@ -45,8 +51,9 @@ version 2.0+.
 
      (pyenv) $ pip install ckanext-harvest
 
-   If you are planning on using RabbitMQ / AMQP as backend, install the dependencies::
+   If you are planning on using Redis or RabbitMQ / AMQP as backend, install the dependencies::
 
+     (pyenv) $ pip install ckanext-harvest[redis]
      (pyenv) $ pip install ckanext-harvest[amqp]
 
    If you want to install a ckanext-harvest version older than 1.6.3, use the old legacy version of the install::
@@ -63,7 +70,7 @@ version 2.0+.
 6. If you haven't done it yet on the previous step, define the backend that you
    are using with the ``ckan.harvest.mq.type`` option in the `[app:main]` section (it defaults to ``redis``)::
 
-     ckan.harvest.mq.type = redis
+     ckan.harvest.mq.type = postgres
 
 
 There are a number of configuration options available for the backends. These don't need to be modified at all if you are using the default Redis or RabbitMQ install (step 1). However you may wish to add them with custom options to the into the CKAN config file the `[app:main]` section. The list below shows the available options and their default values:

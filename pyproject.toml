@@ -30,11 +30,11 @@ dependencies = [
   "ckantoolkit",
   # CKAN core dependencies
   "requests",
-  "redis",
 ]
 
 [project.optional-dependencies]
 amqp = ["pika"]
+redis = ["redis"]
 dev = [
     "pytest-ckan",
     "factory-boy",

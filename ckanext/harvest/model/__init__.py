@@ -352,6 +352,20 @@ class HarvestLog(BaseModel, HarvestDomainObject):
     created = Column(types.DateTime, default=datetime.datetime.utcnow)
 
 
+class HarvestQueueMessage(BaseModel, HarvestDomainObject):
+    """A message of the gather or fetch queue, when the queue backend is
+    the database (``ckan.harvest.mq.type = postgres``). ``claimed`` is
+    set while a consumer works on it and the row goes away on ack."""
+
+    __tablename__ = "harvest_queue"
+
+    id = Column(types.UnicodeText, primary_key=True, default=make_uuid)
+    routing_key = Column(types.UnicodeText, nullable=False, index=True)
+    body = Column(types.UnicodeText, nullable=False)
+    created = Column(types.DateTime, default=datetime.datetime.utcnow)
+    claimed = Column(types.DateTime, nullable=True)
+
+
 def harvest_object_before_insert_listener(mapper, connection, target):
     """
     For compatibility with old harvesters, check if the source id has
