@@ -15,7 +15,8 @@ from ckan.lib.search.index import PackageSearchIndex
 from ckan.plugins import toolkit, PluginImplementations
 from ckan.logic import get_action
 from ckanext.harvest.interfaces import IHarvester
-from ckan.lib.search.common import SearchIndexError, make_connection
+from ckan.lib.search.common import SearchIndexError
+from ckan.lib.search.query import PackageSearchQuery
 
 from ckan.model import Package
 from ckan import logic
@@ -406,30 +407,21 @@ def harvest_source_index_clear(context, data_dict):
 
     harvest_source_id = source.id
 
-    conn = make_connection()
-    query = ''' +%s:"%s" +site_id:"%s" ''' % (
-        'harvest_source_id', harvest_source_id, config.get('ckan.site_id'))
-
-    solr_commit = toolkit.asbool(config.get('ckan.search.solr_commit', 'true'))
-    if toolkit.check_ckan_version(max_version='2.5.99'):
-        # conn is solrpy
-        try:
-            conn.delete_query(query)
-            if solr_commit:
-                conn.commit()
-        except Exception as e:
-            log.exception(e)
-            raise SearchIndexError(e)
-        finally:
-            conn.close()
-    else:
-        # conn is pysolr
-        try:
-            conn.delete(q=query, commit=solr_commit)
-        except Exception as e:
-            log.exception(e)
-            raise SearchIndexError(e)
-
+    # through the search index API, so it works with any search backend
+    index = PackageSearchIndex()
+    query = PackageSearchQuery()
+    fq = '+harvest_source_id:"%s"' % harvest_source_id
+    try:
+        while True:
+            ids = query.run({'q': '*:*', 'fq': fq, 'fl': 'id',
+                             'rows': 1000})['results']
+            if not ids:
+                break
+            for package_id in ids:
+                index.remove_dict({'id': package_id})
+    except Exception as e:
+        log.exception(e)
+        raise SearchIndexError(e)
     return {'id': harvest_source_id}
 
 

@@ -22,55 +22,68 @@ jobs:
 
   test:
     needs: lint
-    strategy:
-      matrix:
-        include:
-          - ckan-version: "2.12"
-            ckan-image: "ckan/ckan-dev:2.12-py3.14"
-          - ckan-version: "2.11"
-            ckan-image: "ckan/ckan-dev:2.11-py3.10"
-          - ckan-version: "2.10"
-            ckan-image: "ckan/ckan-dev:2.10-py3.10"
-      fail-fast: false
-
+    # Tested against the PostgreSQL-only CKAN branch
+    # (https://github.com/parripollo/ckanito): no Solr, no Redis, no CKAN
+    # docker image. CKAN is cloned and installed from source in the job.
+    # The harvest queues use the database (ckan.harvest.mq.type = postgres).
+    name: CKAN PostgreSQL only (parripollo/ckanito master)
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    name: CKAN ${{ matrix.ckan-version }}
-    runs-on: ubuntu-latest
     container:
-      image: ${{ matrix.ckan-image }}
-      options: --user root
+      image: python:3.10-bookworm
     services:
-      solr:
-        image: ckan/ckan-solr:${{ matrix.ckan-version }}-solr9
-      postgres:
-        image: ckan/ckan-postgres-dev:${{ matrix.ckan-version }}
+      ckan-postgres:
+        image: postgres:16
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
         env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
-      redis:
-          image: redis:7
+          POSTGRES_USER: ckan
+          POSTGRES_PASSWORD: ckan
     env:
-      CKAN_SQLALCHEMY_URL: postgresql://ckan_default:pass@postgres/ckan_test
-      CKAN_DATASTORE_WRITE_URL: postgresql://datastore_write:pass@postgres/datastore_test
-      CKAN_DATASTORE_READ_URL: postgresql://datastore_read:pass@postgres/datastore_test
-      CKAN_SOLR_URL: http://solr:8983/solr/ckan
-      CKAN_REDIS_URL: redis://redis:6379/1
+      CKAN_REPO: https://github.com/parripollo/ckanito.git
+      CKAN_BRANCH: master
+      CKAN_SRC: /srv/app/src/ckan
+      PGPASSWORD: ckan
+      PGHOST: ckan-postgres
+      PGUSER: ckan
 
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       with:
         persist-credentials: false
+
+    - name: Install CKAN from source
+      run: |
+        apt-get update && apt-get install -y postgresql-client
+        git clone --depth 1 --branch "$CKAN_BRANCH" "$CKAN_REPO" "$CKAN_SRC"
+        pip install -U pip setuptools
+        pip install -r "$CKAN_SRC/requirements.txt" -r "$CKAN_SRC/dev-requirements.txt"
+        pip install -e "$CKAN_SRC"
+
+    - name: Create the test databases
+      run: |
+        psql -c "CREATE USER ckan_default WITH PASSWORD 'pass' NOSUPERUSER NOCREATEDB NOCREATEROLE;"
+        psql -c "CREATE USER datastore_read WITH PASSWORD 'pass' NOSUPERUSER NOCREATEDB NOCREATEROLE;"
+        psql -c "CREATE USER datastore_write WITH PASSWORD 'pass' NOSUPERUSER NOCREATEDB NOCREATEROLE;"
+        createdb --encoding=utf-8 --owner=ckan_default ckan_test
+        createdb --encoding=utf-8 --owner=datastore_write datastore_test
+        cd "$CKAN_SRC"
+        ckan -c test-core-ci.ini datastore set-permissions | psql
+        psql --dbname=datastore_test -c "CREATE EXTENSION tablefunc;"
+
     - name: Install requirements
       run: |
         pip install -e ".[dev]"
-        # Replace default path to CKAN core config file with the one on the container
-        sed -i -e 's/use = config:.*/use = config:\/srv\/app\/src\/ckan\/test-core.ini/' test.ini
-    - name: Setup extension (CKAN >= 2.9)
+        sed -i -e "s#use = config:.*#use = config:$CKAN_SRC/test-core-ci.ini#" test.ini
+
+    - name: Setup extension
       run: |
         ckan -c test.ini db init
         ckan -c test.ini db pending-migrations --apply
+
     - name: Run tests
       run: pytest --ckan-ini=test.ini --cov=ckanext.harvest --disable-warnings ckanext/harvest/tests

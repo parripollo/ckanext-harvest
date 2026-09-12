@@ -259,6 +259,82 @@ class TestHarvestQueue(object):
         finally:
             redis.delete('ckanext-harvest:some-random-key')
 
+    def test_postgres_queue_purging(self):
+        '''
+        Test that purging the database queues removes waiting and claimed
+        messages of both queues, and only those.
+        '''
+        if config.get('ckan.harvest.mq.type') != 'postgres':
+            pytest.skip()
+        from ckanext.harvest.model import HarvestQueueMessage
+        gather_publisher = queue.get_gather_publisher()
+        gather_publisher.send({'harvest_job_id': str(uuid.uuid4())})
+        gather_publisher.send({'harvest_job_id': str(uuid.uuid4())})
+        fetch_publisher = queue.get_fetch_publisher()
+        fetch_publisher.send({'harvest_object_id': str(uuid.uuid4())})
+        fetch_publisher.send({'harvest_object_id': str(uuid.uuid4())})
+        # a message of another site must survive the purge
+        other = HarvestQueueMessage(routing_key='ckanext-harvest:other:harvest_job_id',
+                                    body='{"harvest_job_id": "x"}')
+        model.Session.add(other)
+        model.Session.commit()
+
+        rows = model.Session.query(HarvestQueueMessage)
+        assert rows.count() == 5
+        # claim one of each: they stay in the table, marked
+        next(queue.get_gather_consumer().consume(queue.get_gather_queue_name()))
+        next(queue.get_fetch_consumer().consume(queue.get_fetch_queue_name()))
+        assert rows.filter(HarvestQueueMessage.claimed.isnot(None)).count() == 2
+
+        queue.purge_queues()
+        assert [r.routing_key for r in rows.all()] == [
+            'ckanext-harvest:other:harvest_job_id']
+
+    def test_postgres_gather_queue_does_not_repeat_a_waiting_job(self):
+        if config.get('ckan.harvest.mq.type') != 'postgres':
+            pytest.skip()
+        from ckanext.harvest.model import HarvestQueueMessage
+        job_id = str(uuid.uuid4())
+        publisher = queue.get_gather_publisher()
+        publisher.send({'harvest_job_id': job_id})
+        publisher.send({'harvest_job_id': job_id})
+        rows = model.Session.query(HarvestQueueMessage).filter_by(
+            routing_key=queue.get_gather_routing_key())
+        assert rows.count() == 1
+
+    def test_postgres_resubmit_jobs_releases_stale_claims(self):
+        '''
+        A message claimed long ago by a consumer that died goes back to the
+        queue; a recent claim is left alone.
+        '''
+        if config.get('ckan.harvest.mq.type') != 'postgres':
+            pytest.skip()
+        import datetime
+        from ckanext.harvest.model import HarvestQueueMessage
+        fetch_publisher = queue.get_fetch_publisher()
+        old_id, new_id = str(uuid.uuid4()), str(uuid.uuid4())
+        fetch_publisher.send({'harvest_object_id': old_id})
+        fetch_publisher.send({'harvest_object_id': new_id})
+        consumer = queue.get_fetch_consumer()
+        consumer.basic_get(queue.get_fetch_queue_name())
+        consumer.basic_get(queue.get_fetch_queue_name())
+        rows = model.Session.query(HarvestQueueMessage).filter_by(
+            routing_key=queue.get_fetch_routing_key())
+        assert rows.filter_by(claimed=None).count() == 0
+        stale = rows.filter(HarvestQueueMessage.body.contains(old_id)).one()
+        stale.claimed = datetime.datetime.utcnow() - datetime.timedelta(minutes=10)
+        model.Session.commit()
+
+        queue.resubmit_jobs()
+
+        released = rows.filter_by(claimed=None).all()
+        assert [json.loads(r.body)['harvest_object_id'] for r in released] == [old_id]
+        # the consumer picks it up again
+        method, header, body = consumer.basic_get(queue.get_fetch_queue_name())
+        assert json.loads(body)['harvest_object_id'] == old_id
+        consumer.basic_ack(body)
+        assert rows.filter(HarvestQueueMessage.body.contains(old_id)).count() == 0
+
     def test_resubmit_objects(self):
         '''
         Test that only harvest objects re-submitted which were not be present in the redis fetch queue.
