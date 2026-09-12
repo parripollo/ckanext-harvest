@@ -487,6 +487,13 @@ class CKANHarvester(HarvesterBase):
                                 for key in ['packages', 'created', 'users', 'groups', 'tags',
                                             'extras', 'display_name', 'type']:
                                     org.pop(key, None)
+                                # An uploaded logo comes as a bare file name in
+                                # image_url, which only exists on the remote site:
+                                # keep the full URL instead
+                                image_url = org.get('image_url') or ''
+                                if image_url and '://' not in image_url and \
+                                        org.get('image_display_url'):
+                                    org['image_url'] = org['image_display_url']
                                 get_action('organization_create')(base_context.copy(), org)
                                 log.info('Organization %s has been newly created', remote_org)
                                 validated_org = org['id']

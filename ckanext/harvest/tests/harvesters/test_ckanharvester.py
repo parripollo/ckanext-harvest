@@ -174,6 +174,18 @@ class TestCkanHarvester(object):
         # Check that the remote group was created locally
         call_action('group_show', {}, id=mock_ckan.GROUPS[0]['id'])
 
+    def test_remote_orgs_create(self):
+        config = {'remote_orgs': 'create'}
+        results_by_guid = run_harvest(
+            url='http://localhost:%s' % mock_ckan.PORT,
+            harvester=CKANHarvester(),
+            config=json.dumps(config))
+        assert 'dataset1-id' in results_by_guid
+        # The remote organization was created locally, with the full URL of
+        # its uploaded logo rather than the bare file name
+        org = call_action('organization_show', {}, id=mock_ckan.ORGS[0]['id'])
+        assert org['image_url'] == mock_ckan.ORGS[0]['image_display_url']
+
     def test_harvest_info_in_package_show(self):
         results_by_guid = run_harvest(
             url='http://localhost:%s' % mock_ckan.PORT,
