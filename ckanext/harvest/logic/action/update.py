@@ -959,7 +959,13 @@ def harvest_source_reindex(context, data_dict):
             new_dict[key] = value
 
     if toolkit.check_ckan_version(min_version="2.12.0b0"):
-        new_dict["with_custom_schema"] = package_dict
+        # package_show serves this dict from the index cache as the
+        # validated one: it has to go through the harvest schema (source_type,
+        # config and frequency as fields, not as extras)
+        new_dict["with_custom_schema"] = logic.get_action('harvest_source_show')(
+            dict(context, validate=True, use_cache=False),
+            {'id': harvest_source_id},
+        )
 
     package_index = PackageSearchIndex()
     package_index.index_package(new_dict, defer_commit=defer_commit)

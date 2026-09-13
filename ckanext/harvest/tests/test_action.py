@@ -249,6 +249,23 @@ class TestActions():
         assert harvest_model.HarvestObject.get(object_.id) is None
         assert model.Package.get(dataset['id']) is None
 
+    def test_harvest_source_reindex_keeps_the_source_fields(self):
+        source_dict = SOURCE_DICT.copy()
+        source_dict['name'] = 'reindexed-source'
+        source = factories.HarvestSource(**source_dict)
+
+        get_action('harvest_source_reindex')(
+            {'ignore_auth': True, 'user': ''}, {'id': source['id']})
+
+        # package_show serves the reindexed source from the index cache:
+        # the harvest fields must still be fields, not extras
+        shown = get_action('harvest_source_show')(
+            {'ignore_auth': True, 'user': ''}, {'id': source['id']})
+        assert shown['source_type'] == source_dict['source_type']
+        assert shown['frequency'] == source_dict['frequency']
+        assert shown['config'] == source_dict['config']
+        assert 'source_type' not in [e['key'] for e in shown.get('extras', [])]
+
     def test_harvest_source_job_history_clear(self):
         # prepare
         source = factories.HarvestSourceObj(**SOURCE_DICT.copy())
