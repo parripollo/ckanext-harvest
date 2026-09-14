@@ -145,8 +145,11 @@ def resubmit_jobs():
     the fetch & gather consumers are triggered to process it.
     '''
     if config.get('ckan.harvest.mq.type') == 'postgres':
-        # 3 minutes for fetch and import, 3 hours for a gather
-        _postgres_release_stale(get_fetch_routing_key(), 180)
+        # 3 minutes for fetch and import, 3 hours for a gather; a harvester
+        # whose import takes longer (downloading files, say) raises the
+        # first one, or its objects are handed out again while in progress
+        fetch_seconds = int(config.get('ckan.harvest.mq.fetch_timeout', 180))
+        _postgres_release_stale(get_fetch_routing_key(), fetch_seconds)
         _postgres_release_stale(get_gather_routing_key(), 7200)
         return
     if config.get('ckan.harvest.mq.type') != 'redis':

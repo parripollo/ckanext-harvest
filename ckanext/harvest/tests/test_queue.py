@@ -335,6 +335,29 @@ class TestHarvestQueue(object):
         consumer.basic_ack(body)
         assert rows.filter(HarvestQueueMessage.body.contains(old_id)).count() == 0
 
+    @pytest.mark.ckan_config('ckan.harvest.mq.fetch_timeout', '3600')
+    def test_postgres_fetch_timeout_is_configurable(self):
+        '''
+        An import that legitimately takes long (a harvester that copies
+        files) is not handed out again: the fetch claim timeout can be raised.
+        '''
+        if config.get('ckan.harvest.mq.type') != 'postgres':
+            pytest.skip()
+        import datetime
+        from ckanext.harvest.model import HarvestQueueMessage
+        fetch_publisher = queue.get_fetch_publisher()
+        fetch_publisher.send({'harvest_object_id': str(uuid.uuid4())})
+        consumer = queue.get_fetch_consumer()
+        consumer.basic_get(queue.get_fetch_queue_name())
+        rows = model.Session.query(HarvestQueueMessage).filter_by(
+            routing_key=queue.get_fetch_routing_key())
+        rows.one().claimed = datetime.datetime.utcnow() - datetime.timedelta(minutes=10)
+        model.Session.commit()
+
+        queue.resubmit_jobs()
+
+        assert rows.filter_by(claimed=None).count() == 0
+
     def test_resubmit_objects(self):
         '''
         Test that only harvest objects re-submitted which were not be present in the redis fetch queue.
