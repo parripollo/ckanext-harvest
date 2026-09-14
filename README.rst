@@ -25,6 +25,13 @@ version 2.0+.
 
       ckan.harvest.mq.type = postgres
 
+     A message a consumer took but did not acknowledge goes back to the
+     queue after a while (a consumer that died): 3 minutes for the fetch
+     queue by default. A harvester whose import stage legitimately takes
+     longer (one that downloads files, for instance) raises it::
+
+      ckan.harvest.mq.fetch_timeout = 7200
+
    * `Redis <http://redis.io/>`_: To install it, run::
 
       sudo apt-get update
