@@ -85,11 +85,16 @@ def get_connection_redis():
     if not redis:
         raise ValueError("The redis library is needed to use Redis as the backend. "
                          "Install it with `pip install ckanext-harvest[redis]`")
+    # redis-py >= 8 defaults ``socket_timeout`` to 5 seconds, whereas older
+    # versions blocked forever. The gather/fetch consumers call ``blpop`` with
+    # no timeout and rely on the socket blocking until a message arrives, so
+    # force blocking behaviour explicitly with ``socket_timeout=None``.
     if not config.get('ckan.harvest.mq.hostname') and config.get('ckan.redis.url'):
         return redis.Redis.from_url(
             config['ckan.redis.url'],
             decode_responses=True,
             encoding='utf-8',
+            socket_timeout=None,
         )
     else:
         return redis.Redis(
@@ -99,6 +104,7 @@ def get_connection_redis():
             db=int(config.get('ckan.harvest.mq.redis_db', REDIS_DB)),
             decode_responses=True,
             encoding='utf-8',
+            socket_timeout=None,
         )
 
 
